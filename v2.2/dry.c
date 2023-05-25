@@ -4,25 +4,88 @@
 	sh) echo 'Use "sh dry.c", not "sh < dry.c"' >&2; exit 1;;
 	*) echo 'Filename must end in ".c"' >&2; exit 1;;
 	esac
-
+  CFLAGS="-w -O2 -fno-common"
+  #编译生成可重定位文件dry1.o
 	echo "${CC=cc} -c ${CFLAGS} $0 -o dry1.o"
 	      ${CC}    -c ${CFLAGS} $0 -o dry1.o || exit 1
-	echo "${CC} -DPASS2 ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2"
-	      ${CC} -DPASS2 ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2 || exit 1
-	./dry2 ${1-50000} 2>/dev/null
-	echo "${CC=cc} -c -DREG ${CFLAGS} $0 -o dry1.o"
-	      ${CC}    -c -DREG ${CFLAGS} $0 -o dry1.o || exit 1
-	echo "${CC} -DPASS2 -DREG ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2nr"
-	      ${CC} -DPASS2 -DREG ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2nr || exit 1
-	./dry2nr ${1-50000} 2>/dev/null
-	echo "${CC=cc} -c -O ${CFLAGS} $0 -o dry1.o"
-	      ${CC}    -c -O ${CFLAGS} $0 -o dry1.o || exit 1
-	echo "${CC} -DPASS2 -O ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2o"
+	
+	echo "${CC} -DPASS2 ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2o"
 	      ${CC} -DPASS2 -O ${CFLAGS} $0 dry1.o ${LFLAGS} -o dry2o || exit 1
-	./dry2o ${1-50000} 2>/dev/null
-	rm -f dry1.o
+  #默认参数
+  N=3               #默认运行重复执行3次
+  nr_cores=$(nproc) #获取cpu核数为默认值
+  cpu_frequent=$(lscpu | grep "CPU 最大 MHz" | awk '{print $4}')  #获取CPU频率
+  parallel=false  #默认串行测试
+  # 解析命令行参数
+  while getopts "N:PC:" opt; do
+    case $opt in
+      N)
+        N="$OPTARG"
+        ;;
+      P)
+        parallel=true
+        ;;
+      C)
+        nr_cores="$OPTARG"
+        ;;
+      \?)
+        echo "Invalid option: -$OPTARG" >&2
+        echo "usage:sh dry.c [-C] [-P] [-N] : -C 指定需要测试的核数 -P 指定是否并行化测试 -N 指定测试重复次数" >&2
+        exit 1
+        ;;
+    esac
+  done
+  #输出基本信息
+  echo "system info: nr_cores=$nr_cores cpu_frequent=$cpu_frequent MHz"
+  echo "run info: N=$N run_cores=$nr_cores parallel=$parallel"
+  # 定义变量记录输出
+  max_dsvalue_ps=0
+  max_dmips_val=0
+  max_dmips_fre=0
 
-        exit 0
+  # 创建临时目录来存储每个核心的输出文件
+  output_dir=$(mktemp -d -p ./)
+
+  # 并行运行程序，并将输出保存到不同的文件中
+  for cidx in $(seq 0 $((nr_cores-1)))
+  do
+    for i in $(seq 1 $N)
+    do 
+      if [ "$parallel" = true ] 
+      then taskset -c $cidx ./dry2o 200000000 2>/dev/null >> $output_dir/output$cidx &
+      else
+        taskset -c $cidx ./dry2o 200000000 2>/dev/null >> $output_dir/output$cidx
+      fi
+    done
+  done
+
+  # 等待所有后台任务完成
+  wait
+
+  # 解析每个核心的输出结果并找出最优值
+  for i in $(seq 0 $((nr_cores-1)))
+  do
+    max_dsvalue_ps=0
+    while IFS= read -r line; do
+      if echo "$line" | grep -q "Dhrystones per Second:"; then
+        dsvalue_ps=$(echo "$line" | awk '{print $4}')
+        #echo "core#$i value=$dsvalue_ps"
+        if [ "$dsvalue_ps" -gt "$max_dsvalue_ps" ]; then
+          max_dsvalue_ps=$dsvalue_ps
+        fi
+      fi
+    done < "$output_dir/output$i" #从文件中获取输入
+  
+    max_dmips_val=$(echo "scale=2; $max_dsvalue_ps / 1575" | bc)  #将输出的值转换成DMIPS
+    max_dmips_fre=$(echo "scale=2; $max_dmips_val / $cpu_frequent" | bc)  #计算DMIPS/MHz
+
+    echo "core#$i $N 次最优 DMIPS=$max_dmips_val DMIPS/MHz=$max_dmips_fre"
+  done
+
+  # 删除临时目录及其中的输出文件
+  rm -rf $output_dir
+  rm -f dry1.o
+  exit 0
 #endif
 
 /****************** "DHRYSTONE" Benchmark Program ***************************/
